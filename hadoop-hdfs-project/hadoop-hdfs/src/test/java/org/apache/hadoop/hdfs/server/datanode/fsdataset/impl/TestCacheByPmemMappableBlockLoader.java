@@ -21,8 +21,6 @@ import org.apache.hadoop.hdfs.ExtendedBlockId;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeFaultInjector;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_CACHE_LOADER_CLASS;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_CACHE_PMEM_CAPACITY_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_CACHE_PMEM_DIRS_KEY;
 import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
 import static org.junit.Assert.assertEquals;
@@ -86,7 +84,6 @@ public class TestCacheByPmemMappableBlockLoader {
   private static DistributedFileSystem fs;
   private static DataNode dn;
   private static FsDatasetCache cacheManager;
-  private static PmemMappableBlockLoader cacheLoader;
   /**
    * Used to pause DN BPServiceActor threads. BPSA threads acquire the
    * shared read lock. The test acquires the write lock for exclusive access.
@@ -133,20 +130,15 @@ public class TestCacheByPmemMappableBlockLoader {
         DFSConfigKeys.DFS_NAMENODE_PATH_BASED_CACHE_REFRESH_INTERVAL_MS, 100);
     conf.setLong(DFSConfigKeys.DFS_CACHEREPORT_INTERVAL_MSEC_KEY, 500);
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    conf.setLong(DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY,
-        CACHE_CAPACITY);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFS_DATANODE_FSDATASETCACHE_MAX_THREADS_PER_VOLUME_KEY, 10);
 
     // Configuration for pmem cache
-    conf.set(DFS_DATANODE_CACHE_LOADER_CLASS,
-        "org.apache.hadoop.hdfs.server.datanode." +
-            "fsdataset.impl.PmemMappableBlockLoader");
     new File(PMEM_DIR_0).getAbsoluteFile().mkdir();
     new File(PMEM_DIR_1).getAbsoluteFile().mkdir();
     // Configure two bogus pmem volumes
     conf.set(DFS_DATANODE_CACHE_PMEM_DIRS_KEY, PMEM_DIR_0 + "," + PMEM_DIR_1);
-    conf.setLong(DFS_DATANODE_CACHE_PMEM_CAPACITY_KEY, CACHE_CAPACITY);
+    PmemVolumeManager.setMaxBytes((long) (CACHE_CAPACITY * 0.5));
 
     prevCacheManipulator = NativeIO.POSIX.getCacheManipulator();
     NativeIO.POSIX.setCacheManipulator(new NoMlockCacheManipulator());
@@ -158,7 +150,6 @@ public class TestCacheByPmemMappableBlockLoader {
     fs = cluster.getFileSystem();
     dn = cluster.getDataNodes().get(0);
     cacheManager = ((FsDatasetImpl) dn.getFSDataset()).cacheManager;
-    cacheLoader = (PmemMappableBlockLoader) cacheManager.getCacheLoader();
   }
 
   @After
@@ -183,18 +174,17 @@ public class TestCacheByPmemMappableBlockLoader {
 
   @Test
   public void testPmemVolumeManager() throws IOException {
-    PmemVolumeManager pmemVolumeManager =
-        cacheLoader.getPmemVolumeManager();
+    PmemVolumeManager pmemVolumeManager = PmemVolumeManager.getInstance();
     assertNotNull(pmemVolumeManager);
     assertEquals(CACHE_CAPACITY, pmemVolumeManager.getCacheCapacity());
     // Test round-robin selection policy
     long count1 = 0, count2 = 0;
     for (int i = 0; i < 10; i++) {
-      Byte index = pmemVolumeManager.getOneVolumeIndex();
+      Byte index = pmemVolumeManager.chooseVolume(BLOCK_SIZE);
       String volume = pmemVolumeManager.getVolumeByIndex(index);
-      if (volume.equals(PMEM_DIR_0)) {
+      if (volume.equals(PmemVolumeManager.getRealPmemDir(PMEM_DIR_0))) {
         count1++;
-      } else if (volume.equals(PMEM_DIR_1)) {
+      } else if (volume.equals(PmemVolumeManager.getRealPmemDir(PMEM_DIR_1))) {
         count2++;
       } else {
         fail("Unexpected persistent storage location:" + volume);
@@ -222,7 +212,9 @@ public class TestCacheByPmemMappableBlockLoader {
         Ints.checkedCast(CACHE_CAPACITY / BLOCK_SIZE);
     BlockReaderTestUtil.enableHdfsCachingTracing();
     Assert.assertEquals(0, CACHE_CAPACITY % BLOCK_SIZE);
-    assertEquals(CACHE_CAPACITY, cacheManager.getPmemCacheCapacity());
+    assertEquals(CACHE_CAPACITY, cacheManager.getCacheCapacity());
+    // DRAM cache is expected to be disabled.
+    assertEquals(0L, cacheManager.getMemCacheCapacity());
 
     final Path testFile = new Path("/testFile");
     final long testFileLen = maxCacheBlocksNum * BLOCK_SIZE;
@@ -252,9 +244,11 @@ public class TestCacheByPmemMappableBlockLoader {
     }, 1000, 30000);
 
     // The pmem cache space is expected to have been used up.
-    assertEquals(CACHE_CAPACITY, cacheManager.getPmemCacheUsed());
+    assertEquals(CACHE_CAPACITY, cacheManager.getCacheUsed());
+    // There should be no cache used on DRAM.
+    assertEquals(0L, cacheManager.getMemCacheUsed());
     Map<ExtendedBlockId, Byte> blockKeyToVolume =
-        cacheLoader.getPmemVolumeManager().getBlockKeyToVolume();
+        PmemVolumeManager.getInstance().getBlockKeyToVolume();
     // All block keys should be kept in blockKeyToVolume
     assertEquals(blockKeyToVolume.size(), maxCacheBlocksNum);
     assertTrue(blockKeyToVolume.keySet().containsAll(blockKeys));
@@ -266,11 +260,13 @@ public class TestCacheByPmemMappableBlockLoader {
       // to pmem.
       assertNotNull(cachePath);
       String expectFileName =
-          cacheLoader.getPmemVolumeManager().getCacheFileName(key);
+          PmemVolumeManager.getInstance().getCacheFileName(key);
       if (cachePath.startsWith(PMEM_DIR_0)) {
-        assertTrue(cachePath.equals(PMEM_DIR_0 + "/" + expectFileName));
+        assertTrue(cachePath.equals(PmemVolumeManager
+            .getRealPmemDir(PMEM_DIR_0) + "/" + expectFileName));
       } else if (cachePath.startsWith(PMEM_DIR_1)) {
-        assertTrue(cachePath.equals(PMEM_DIR_1 + "/" + expectFileName));
+        assertTrue(cachePath.equals(PmemVolumeManager
+            .getRealPmemDir(PMEM_DIR_1) + "/" + expectFileName));
       } else {
         fail("The cache path is not the expected one: " + cachePath);
       }
@@ -322,7 +318,7 @@ public class TestCacheByPmemMappableBlockLoader {
     }, 1000, 30000);
 
     // It is expected that no pmem cache space is used.
-    assertEquals(0, cacheManager.getPmemCacheUsed());
+    assertEquals(0, cacheManager.getCacheUsed());
     // No record should be kept by blockKeyToVolume after testFile is uncached.
     assertEquals(blockKeyToVolume.size(), 0);
   }

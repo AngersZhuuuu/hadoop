@@ -70,7 +70,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Generic tests for overcommitting resources. This needs to be instantiated
- * with a scheduler ({@link YarnConfiguration.RM_SCHEDULER}).
+ * with a scheduler ({@link YarnConfiguration#RM_SCHEDULER}).
  *
  * If reducing the amount of resources leads to overcommitting (negative
  * available resources), the scheduler will select containers to make room.
@@ -142,7 +142,7 @@ public abstract class TestSchedulerOvercommit {
    * Get the configuration for the scheduler. This is used when setting up the
    * Resource Manager and should setup the scheduler (e.g., Capacity Scheduler
    * or Fair Scheduler). It needs to set the configuration with
-   * {@link YarnConfiguration.RM_SCHEDULER}.
+   * {@link YarnConfiguration#RM_SCHEDULER}.
    * @return Configuration for the scheduler.
    */
   protected Configuration getConfiguration() {
@@ -286,6 +286,9 @@ public abstract class TestSchedulerOvercommit {
     updateNodeResource(rm, nmId, 2 * GB, 2, timeout);
     waitMemory(scheduler, nm, 4 * GB, -2 * GB, INTERVAL, timeout);
 
+    // wait until MARK_CONTAINER_FOR_PREEMPTION is handled
+    rm.drainEvents();
+
     // We should receive a notification to preempt the container
     PreemptionMessage preemptMsg = am.schedule().getPreemptionMessage();
     assertPreemption(container.getId(), preemptMsg);
@@ -315,12 +318,15 @@ public abstract class TestSchedulerOvercommit {
     Container container = createContainer(am, 2 * GB);
     assertMemory(scheduler, nmId, 4 * GB, 0);
 
-    // We give an overcommit time out of 2 seconds
+    // We give an overcommit time out of 1 seconds
     final int timeout = (int)TimeUnit.SECONDS.toMillis(1);
 
     // Reducing to 2GB should first preempt the container
     updateNodeResource(rm, nmId, 2 * GB, 2, timeout);
     waitMemory(scheduler, nm, 4 * GB, -2 * GB, INTERVAL, timeout);
+
+    // wait until MARK_CONTAINER_FOR_PREEMPTION is handled
+    rm.drainEvents();
 
     // We should receive a notification to preempt the container
     PreemptionMessage preemptMsg = am.schedule().getPreemptionMessage();
@@ -479,6 +485,9 @@ public abstract class TestSchedulerOvercommit {
     updateNodeResource(rm, nmId, 3 * GB, 2, 2 * 1000);
     waitMemory(scheduler, nmId, 5 * GB, -2 * GB, 200, 5 * 1000);
 
+    // wait until MARK_CONTAINER_FOR_PREEMPTION is handled
+    rm.drainEvents();
+
     PreemptionMessage preemptMsg = am.schedule().getPreemptionMessage();
     assertPreemption(c2.getId(), preemptMsg);
 
@@ -492,6 +501,9 @@ public abstract class TestSchedulerOvercommit {
     long t0 = Time.now();
     updateNodeResource(rm, nmId, 3 * GB, 2, 2 * 1000);
     waitMemory(scheduler, nmId, 5 * GB, -2 * GB, 200, 5 * 1000);
+
+    // wait until MARK_CONTAINER_FOR_PREEMPTION is handled
+    rm.drainEvents();
 
     preemptMsg = am.schedule().getPreemptionMessage();
     assertPreemption(c2.getId(), preemptMsg);
@@ -519,7 +531,7 @@ public abstract class TestSchedulerOvercommit {
 
   /**
    * Create a container with a particular size and make sure it succeeds.
-   * @param am Application Master to add the container to.
+   * @param app Application Master to add the container to.
    * @param memory Memory of the container.
    * @return Newly created container.
    * @throws Exception If there are issues creating the container.

@@ -18,7 +18,7 @@ OZONE-SITE.XML_ozone.om.address=om
 OZONE-SITE.XML_ozone.om.http-address=om:9874
 OZONE-SITE.XML_ozone.scm.names=scm
 OZONE-SITE.XML_ozone.enabled=True
-OZONE-SITE.XML_ozone.scm.datanode.id=/data/datanode.id
+OZONE-SITE.XML_ozone.scm.datanode.id.dir=/data
 OZONE-SITE.XML_ozone.scm.block.client.address=scm
 OZONE-SITE.XML_ozone.metadata.dirs=/data/metadata
 OZONE-SITE.XML_ozone.handler.type=distributed
@@ -31,6 +31,7 @@ OZONE-SITE.XML_ozone.om.kerberos.principal=om/om@EXAMPLE.COM
 OZONE-SITE.XML_ozone.om.kerberos.keytab.file=/etc/security/keytabs/om.keytab
 OZONE-SITE.XML_ozone.s3g.keytab.file=/etc/security/keytabs/HTTP.keytab
 OZONE-SITE.XML_ozone.s3g.authentication.kerberos.principal=HTTP/s3g@EXAMPLE.COM
+OZONE_SITE.XML_ozone.administrators=*
 
 OZONE-SITE.XML_ozone.security.enabled=true
 OZONE-SITE.XML_hdds.scm.http.kerberos.principal=HTTP/scm@EXAMPLE.COM
@@ -46,7 +47,7 @@ HDFS-SITE.XML_dfs.datanode.address=0.0.0.0:1019
 HDFS-SITE.XML_dfs.datanode.http.address=0.0.0.0:1012
 CORE-SITE.XML_dfs.data.transfer.protection=authentication
 CORE-SITE.XML_hadoop.security.authentication=kerberos
-COER-SITE.XML_hadoop.security.auth_to_local=RULE:[2:$1@$0](.*@EXAMPLE.COM)s/@.*///L
+CORE-SITE.XML_hadoop.security.auth_to_local=RULE:[2:$1@$0](.*@EXAMPLE.COM)s/@.*///L
 CORE-SITE.XML_hadoop.security.key.provider.path=kms://http@kms:9600/kms
 
 #temporary disable authorization as org.apache.hadoop.yarn.server.api.ResourceTrackerPB is not properly annotated to support it
@@ -168,7 +169,7 @@ LOG4J2.PROPERTIES_rootLogger.appenderRef.stdout.ref=STDOUT
 
 OZONE_DATANODE_SECURE_USER=root
 KEYTAB_DIR=/etc/security/keytabs
-KERBEROS_KEYTABS=dn om scm HTTP testuser s3g rm nm yarn jhs hadoop
+KERBEROS_KEYTABS=dn om scm HTTP testuser s3g rm nm yarn jhs hadoop spark
 KERBEROS_KEYSTORES=hadoop
 KERBEROS_SERVER=kdc
 JAVA_HOME=/usr/lib/jvm/jre

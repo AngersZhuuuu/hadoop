@@ -18,19 +18,34 @@
 
 package org.apache.hadoop.hdds.scm.container;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.GeneratedMessage;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import org.apache.hadoop.conf.Configuration;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringJoiner;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import org.apache.hadoop.hdds.conf.Config;
+import org.apache.hadoop.hdds.conf.ConfigGroup;
+import org.apache.hadoop.hdds.conf.ConfigType;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.LifeCycleState;
-import org.apache.hadoop.hdds.protocol.proto
-    .StorageContainerDatanodeProtocolProtos.ContainerReplicaProto.State;
-import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.hdds.scm.container.placement.algorithms
-    .ContainerPlacementPolicy;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.ContainerReplicaProto.State;
+import org.apache.hadoop.hdds.scm.container.placement.algorithms.ContainerPlacementPolicy;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.server.events.EventPublisher;
+import org.apache.hadoop.metrics2.MetricsCollector;
+import org.apache.hadoop.metrics2.MetricsInfo;
+import org.apache.hadoop.metrics2.MetricsSource;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.ozone.lock.LockManager;
 import org.apache.hadoop.ozone.protocol.commands.CloseContainerCommand;
 import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
@@ -39,34 +54,27 @@ import org.apache.hadoop.ozone.protocol.commands.ReplicateContainerCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.Time;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.protobuf.GeneratedMessage;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import static org.apache.hadoop.hdds.conf.ConfigTag.OZONE;
+import static org.apache.hadoop.hdds.conf.ConfigTag.SCM;
 import org.apache.ratis.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
-import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 /**
  * Replication Manager (RM) is the one which is responsible for making sure
  * that the containers are properly replicated. Replication Manager deals only
  * with Quasi Closed / Closed container.
  */
-public class ReplicationManager {
+public class ReplicationManager implements MetricsSource {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(ReplicationManager.class);
+
+  public static final String METRICS_SOURCE_NAME = "SCMReplicationManager";
 
   /**
    * Reference to the ContainerManager.
@@ -102,21 +110,15 @@ public class ReplicationManager {
   private final Map<ContainerID, List<InflightAction>> inflightDeletion;
 
   /**
+   * ReplicationManager specific configuration.
+   */
+  private final ReplicationManagerConfiguration conf;
+
+  /**
    * ReplicationMonitor thread is the one which wakes up at configured
    * interval and processes all the containers.
    */
-  private final Thread replicationMonitor;
-
-  /**
-   * The frequency in which ReplicationMonitor thread should run.
-   */
-  private final long interval;
-
-  /**
-   * Timeout for container replication & deletion command issued by
-   * ReplicationManager.
-   */
-  private final long eventTimeout;
+  private Thread replicationMonitor;
 
   /**
    * Flag used for checking if the ReplicationMonitor thread is running or
@@ -132,37 +134,36 @@ public class ReplicationManager {
    * @param containerPlacement ContainerPlacementPolicy
    * @param eventPublisher EventPublisher
    */
-  public ReplicationManager(final Configuration conf,
+  public ReplicationManager(final ReplicationManagerConfiguration conf,
                             final ContainerManager containerManager,
                             final ContainerPlacementPolicy containerPlacement,
-                            final EventPublisher eventPublisher) {
+                            final EventPublisher eventPublisher,
+                            final LockManager<ContainerID> lockManager) {
     this.containerManager = containerManager;
     this.containerPlacement = containerPlacement;
     this.eventPublisher = eventPublisher;
-    this.lockManager = new LockManager<>(conf);
-    this.inflightReplication = new HashMap<>();
-    this.inflightDeletion = new HashMap<>();
-    this.replicationMonitor = new Thread(this::run);
-    this.replicationMonitor.setName("ReplicationMonitor");
-    this.replicationMonitor.setDaemon(true);
-    this.interval = conf.getTimeDuration(
-        ScmConfigKeys.HDDS_SCM_REPLICATION_THREAD_INTERVAL,
-        ScmConfigKeys.HDDS_SCM_REPLICATION_THREAD_INTERVAL_DEFAULT,
-        TimeUnit.MILLISECONDS);
-    this.eventTimeout = conf.getTimeDuration(
-        ScmConfigKeys.HDDS_SCM_REPLICATION_EVENT_TIMEOUT,
-        ScmConfigKeys.HDDS_SCM_REPLICATION_EVENT_TIMEOUT_DEFAULT,
-        TimeUnit.MILLISECONDS);
+    this.lockManager = lockManager;
+    this.conf = conf;
     this.running = false;
+    this.inflightReplication = new ConcurrentHashMap<>();
+    this.inflightDeletion = new ConcurrentHashMap<>();
   }
 
   /**
    * Starts Replication Monitor thread.
    */
   public synchronized void start() {
-    if (!running) {
+
+    if (!isRunning()) {
+      DefaultMetricsSystem.instance().register(METRICS_SOURCE_NAME,
+          "SCM Replication manager (closed container replication) related "
+              + "metrics",
+          this);
       LOG.info("Starting Replication Monitor Thread.");
       running = true;
+      replicationMonitor = new Thread(this::run);
+      replicationMonitor.setName("ReplicationMonitor");
+      replicationMonitor.setDaemon(true);
       replicationMonitor.start();
     } else {
       LOG.info("Replication Monitor Thread is already running.");
@@ -175,7 +176,13 @@ public class ReplicationManager {
    * @return true if running, false otherwise
    */
   public boolean isRunning() {
-    return replicationMonitor.isAlive();
+    if (!running) {
+      synchronized (this) {
+        return replicationMonitor != null
+            && replicationMonitor.isAlive();
+      }
+    }
+    return true;
   }
 
   /**
@@ -184,7 +191,7 @@ public class ReplicationManager {
   @VisibleForTesting
   @SuppressFBWarnings(value="NN_NAKED_NOTIFY",
       justification="Used only for testing")
-  synchronized void processContainersNow() {
+  public synchronized void processContainersNow() {
     notify();
   }
 
@@ -194,6 +201,8 @@ public class ReplicationManager {
   public synchronized void stop() {
     if (running) {
       LOG.info("Stopping Replication Monitor Thread.");
+      inflightReplication.clear();
+      inflightDeletion.clear();
       running = false;
       notify();
     } else {
@@ -217,7 +226,7 @@ public class ReplicationManager {
                 " processing {} containers.", Time.monotonicNow() - start,
             containerIds.size());
 
-        wait(interval);
+        wait(conf.getInterval());
       }
     } catch (Throwable t) {
       // When we get runtime exception, we should terminate SCM.
@@ -337,7 +346,7 @@ public class ReplicationManager {
       final Map<ContainerID, List<InflightAction>> inflightActions,
       final Predicate<InflightAction> filter) {
     final ContainerID id = container.containerID();
-    final long deadline = Time.monotonicNow() - eventTimeout;
+    final long deadline = Time.monotonicNow() - conf.getEventTimeout();
     if (inflightActions.containsKey(id)) {
       final List<InflightAction> actions = inflightActions.get(id);
       actions.removeIf(action -> action.time < deadline);
@@ -473,6 +482,8 @@ public class ReplicationManager {
    */
   private void handleUnderReplicatedContainer(final ContainerInfo container,
       final Set<ContainerReplica> replicas) {
+    LOG.debug("Handling underreplicated container: {}",
+        container.getContainerID());
     try {
       final ContainerID id = container.containerID();
       final List<DatanodeDetails> deletionInFlight = inflightDeletion
@@ -492,8 +503,17 @@ public class ReplicationManager {
         final int replicationFactor = container
             .getReplicationFactor().getNumber();
         final int delta = replicationFactor - getReplicaCount(id, replicas);
+        final List<DatanodeDetails> excludeList = replicas.stream()
+            .map(ContainerReplica::getDatanodeDetails)
+            .collect(Collectors.toList());
+        List<InflightAction> actionList = inflightReplication.get(id);
+        if (actionList != null) {
+          actionList.stream().map(r -> r.datanode)
+              .forEach(excludeList::add);
+        }
         final List<DatanodeDetails> selectedDatanodes = containerPlacement
-            .chooseDatanodes(source, delta, container.getUsedBytes());
+            .chooseDatanodes(excludeList, null, delta,
+                container.getUsedBytes());
 
         LOG.info("Container {} is under replicated. Expected replica count" +
                 " is {}, but found {}.", id, replicationFactor,
@@ -740,6 +760,16 @@ public class ReplicationManager {
     }
   }
 
+  @Override
+  public void getMetrics(MetricsCollector collector, boolean all) {
+    collector.addRecord(ReplicationManager.class.getSimpleName())
+        .addGauge(ReplicationManagerMetrics.INFLIGHT_REPLICATION,
+            inflightReplication.size())
+        .addGauge(ReplicationManagerMetrics.INFLIGHT_DELETION,
+            inflightDeletion.size())
+        .endRecord();
+  }
+
   /**
    * Wrapper class to hold the InflightAction with its start time.
    */
@@ -752,6 +782,94 @@ public class ReplicationManager {
                            final long time) {
       this.datanode = datanode;
       this.time = time;
+    }
+  }
+
+  /**
+   * Configuration used by the Replication Manager.
+   */
+  @ConfigGroup(prefix = "hdds.scm.replication")
+  public static class ReplicationManagerConfiguration {
+    /**
+     * The frequency in which ReplicationMonitor thread should run.
+     */
+    private long interval = 5 * 60 * 1000;
+
+    /**
+     * Timeout for container replication & deletion command issued by
+     * ReplicationManager.
+     */
+    private long eventTimeout = 10 * 60 * 1000;
+
+    @Config(key = "thread.interval",
+        type = ConfigType.TIME,
+        defaultValue = "300s",
+        tags = {SCM, OZONE},
+        description = "When a heartbeat from the data node arrives on SCM, "
+            + "It is queued for processing with the time stamp of when the "
+            + "heartbeat arrived. There is a heartbeat processing thread "
+            + "inside "
+            + "SCM that runs at a specified interval. This value controls how "
+            + "frequently this thread is run.\n\n"
+            + "There are some assumptions build into SCM such as this "
+            + "value should allow the heartbeat processing thread to run at "
+            + "least three times more frequently than heartbeats and at least "
+            + "five times more than stale node detection time. "
+            + "If you specify a wrong value, SCM will gracefully refuse to "
+            + "run. "
+            + "For more info look at the node manager tests in SCM.\n"
+            + "\n"
+            + "In short, you don't need to change this."
+    )
+    public void setInterval(long interval) {
+      this.interval = interval;
+    }
+
+    @Config(key = "event.timeout",
+        type = ConfigType.TIME,
+        defaultValue = "10m",
+        tags = {SCM, OZONE},
+        description = "Timeout for the container replication/deletion commands "
+            + "sent  to datanodes. After this timeout the command will be "
+            + "retried.")
+    public void setEventTimeout(long eventTimeout) {
+      this.eventTimeout = eventTimeout;
+    }
+
+    public long getInterval() {
+      return interval;
+    }
+
+    public long getEventTimeout() {
+      return eventTimeout;
+    }
+  }
+
+  /**
+   * Metric name definitions for Replication manager.
+   */
+  public enum ReplicationManagerMetrics implements MetricsInfo {
+
+    INFLIGHT_REPLICATION("Tracked inflight container replication requests."),
+    INFLIGHT_DELETION("Tracked inflight container deletion requests.");
+
+    private final String desc;
+
+    ReplicationManagerMetrics(String desc) {
+      this.desc = desc;
+    }
+
+    @Override
+    public String description() {
+      return desc;
+    }
+
+    @Override
+    public String toString() {
+      return new StringJoiner(", ", this.getClass().getSimpleName() + "{", "}")
+          .add("name=" + name())
+          .add("description=" + desc)
+          .toString();
     }
   }
 }

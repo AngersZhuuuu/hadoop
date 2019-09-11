@@ -43,17 +43,17 @@ public abstract class AbstractSqlDatabaseTest {
 
   @ClassRule
   public static TemporaryFolder temporaryFolder = new TemporaryFolder();
-  private static File tempDir;
 
   private static Injector injector;
   private static DSLContext dslContext;
 
   @BeforeClass
   public static void setup() throws IOException {
-    tempDir = temporaryFolder.newFolder();
+    File tempDir = temporaryFolder.newFolder();
 
     DataSourceConfigurationProvider configurationProvider =
-        new DataSourceConfigurationProvider();
+        new DataSourceConfigurationProvider(tempDir);
+
     JooqPersistenceModule persistenceModule =
         new JooqPersistenceModule(configurationProvider);
 
@@ -80,8 +80,17 @@ public abstract class AbstractSqlDatabaseTest {
     return dslContext;
   }
 
-  static class DataSourceConfigurationProvider implements
+  /**
+   * Local Sqlite datasource provider.
+   */
+  public static class DataSourceConfigurationProvider implements
       Provider<DataSourceConfiguration> {
+
+    private final File tempDir;
+
+    public DataSourceConfigurationProvider(File tempDir) {
+      this.tempDir = tempDir;
+    }
 
     @Override
     public DataSourceConfiguration get() {

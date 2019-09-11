@@ -117,7 +117,8 @@ public abstract class AbstractNNFailoverProxyProvider<T> implements
     /**
      * The currently known state of the NameNode represented by this ProxyInfo.
      * This may be out of date if the NameNode has changed state since the last
-     * time the state was checked.
+     * time the state was checked. If the NameNode could not be contacted, this
+     * will store null to indicate an unknown state.
      */
     private HAServiceState cachedState;
 
@@ -233,7 +234,7 @@ public abstract class AbstractNNFailoverProxyProvider<T> implements
           conf, nameNodeUri, HdfsClientConfigKeys.Failover.RESOLVE_SERVICE_KEY);
     // If the address needs to be resolved, get all of the IP addresses
     // from this address and pass them into the proxy
-    LOG.info("Namenode domain name will be resolved with {}",
+    LOG.debug("Namenode domain name will be resolved with {}",
         dnr.getClass().getName());
     for (InetSocketAddress address : addressesOfNns) {
       String[] resolvedHostNames = dnr.getAllResolvedHostnameByDomainName(

@@ -63,7 +63,7 @@ import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeFaultInjector;
 import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.MemoryCacheStats.PageRounder;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.CacheStats.PageRounder;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.BlockIdCommand;
@@ -401,9 +401,10 @@ public class TestFsDatasetCache {
     GenericTestUtils.waitFor(new Supplier<Boolean>() {
       @Override
       public Boolean get() {
+        // check the log reported by FsDataSetCache
+        // in the case that cache capacity is exceeded.
         int lines = appender.countLinesWithMessage(
-            "more bytes in the cache: " +
-            DFSConfigKeys.DFS_DATANODE_MAX_LOCKED_MEMORY_KEY);
+            "could not reserve more bytes in the cache: ");
         return lines > 0;
       }
     }, 500, 30000);

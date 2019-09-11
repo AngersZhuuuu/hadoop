@@ -43,6 +43,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
@@ -386,18 +387,17 @@ public class SCMContainerManager implements ContainerManager {
 
   public ContainerInfo getMatchingContainer(final long sizeRequired,
       String owner, Pipeline pipeline, List<ContainerID> excludedContainers) {
+    NavigableSet<ContainerID> containerIDs;
     try {
-      //TODO: #CLUTIL See if lock is required here
-      NavigableSet<ContainerID> containerIDs =
-          pipelineManager.getContainersInPipeline(pipeline.getId());
+      synchronized (pipeline) {
+        //TODO: #CLUTIL See if lock is required here
+        containerIDs =
+            pipelineManager.getContainersInPipeline(pipeline.getId());
 
-      containerIDs = getContainersForOwner(containerIDs, owner);
-      if (containerIDs.size() < numContainerPerOwnerInPipeline) {
-        synchronized (pipeline) {
+        containerIDs = getContainersForOwner(containerIDs, owner);
+        if (containerIDs.size() < numContainerPerOwnerInPipeline) {
           // TODO: #CLUTIL Maybe we can add selection logic inside synchronized
           // as well
-          containerIDs = getContainersForOwner(
-              pipelineManager.getContainersInPipeline(pipeline.getId()), owner);
           if (containerIDs.size() < numContainerPerOwnerInPipeline) {
             ContainerInfo containerInfo =
                 containerStateManager.allocateContainer(pipelineManager, owner,
@@ -470,15 +470,17 @@ public class SCMContainerManager implements ContainerManager {
    */
   private NavigableSet<ContainerID> getContainersForOwner(
       NavigableSet<ContainerID> containerIDs, String owner) {
-    for (ContainerID cid : containerIDs) {
+    Iterator<ContainerID> containerIDIterator = containerIDs.iterator();
+    while (containerIDIterator.hasNext()) {
+      ContainerID cid = containerIDIterator.next();
       try {
         if (!getContainer(cid).getOwner().equals(owner)) {
-          containerIDs.remove(cid);
+          containerIDIterator.remove();
         }
       } catch (ContainerNotFoundException e) {
         LOG.error("Could not find container info for container id={} {}", cid,
             e);
-        containerIDs.remove(cid);
+        containerIDIterator.remove();
       }
     }
     return containerIDs;

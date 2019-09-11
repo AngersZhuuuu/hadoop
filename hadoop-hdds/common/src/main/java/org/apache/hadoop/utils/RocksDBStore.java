@@ -75,7 +75,8 @@ public class RocksDBStore implements MetadataStore {
         jmxProperties.put("dbName", dbFile.getName());
         statMBeanName = HddsUtils.registerWithJmxProperties(
             "Ozone", "RocksDbStore", jmxProperties,
-            new RocksDBStoreMBean(dbOptions.statistics()));
+            RocksDBStoreMBean.create(dbOptions.statistics(),
+                dbFile.getName()));
         if (statMBeanName == null) {
           LOG.warn("jmx registration failed during RocksDB init, db path :{}",
               dbFile.getAbsolutePath());
@@ -274,6 +275,19 @@ public class RocksDBStore implements MetadataStore {
         db.compactRange();
       } catch (RocksDBException e) {
         throw toIOException("Failed to compact db", e);
+      }
+    }
+  }
+
+  @Override
+  public void flushDB(boolean sync) throws IOException {
+    if (db != null) {
+      try {
+        // for RocksDB it is sufficient to flush the WAL as entire db can
+        // be reconstructed using it.
+        db.flushWal(sync);
+      } catch (RocksDBException e) {
+        throw toIOException("Failed to flush db", e);
       }
     }
   }

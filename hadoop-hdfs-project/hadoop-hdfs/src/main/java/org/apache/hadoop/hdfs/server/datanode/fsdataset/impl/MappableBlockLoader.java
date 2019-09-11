@@ -18,10 +18,17 @@
 
 package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl;
 
+import com.google.common.base.Preconditions;
+import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.hdfs.ExtendedBlockId;
+import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
+import org.apache.hadoop.hdfs.server.datanode.DNConf;
+import org.apache.hadoop.util.DataChecksum;
 
+import java.io.BufferedInputStream;
+import java.io.DataInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -37,7 +44,7 @@ public abstract class MappableBlockLoader {
   /**
    * Initialize a specific MappableBlockLoader.
    */
-  abstract void initialize(FsDatasetCache cacheManager) throws IOException;
+  abstract CacheStats initialize(DNConf dnConf) throws IOException;
 
   /**
    * Load the block.
@@ -58,33 +65,31 @@ public abstract class MappableBlockLoader {
    * @return               The Mappable block.
    */
   abstract MappableBlock load(long length, FileInputStream blockIn,
-                              FileInputStream metaIn, String blockFileName,
-                              ExtendedBlockId key)
+      FileInputStream metaIn, String blockFileName, ExtendedBlockId key)
       throws IOException;
 
   /**
    * Try to reserve some given bytes.
+   *
+   * @param key           The ExtendedBlockId for a block.
    *
    * @param bytesCount    The number of bytes to add.
    *
    * @return              The new number of usedBytes if we succeeded;
    *                      -1 if we failed.
    */
-  abstract long reserve(long bytesCount);
+  abstract long reserve(ExtendedBlockId key, long bytesCount);
 
   /**
    * Release some bytes that we're using.
+   *
+   * @param key           The ExtendedBlockId for a block.
    *
    * @param bytesCount    The number of bytes to release.
    *
    * @return              The new number of usedBytes.
    */
-  abstract long release(long bytesCount);
-
-  /**
-   * Get the config key of cache capacity.
-   */
-  abstract String getCacheCapacityConfigKey();
+  abstract long release(ExtendedBlockId key, long bytesCount);
 
   /**
    * Get the approximate amount of cache space used.
@@ -102,9 +107,68 @@ public abstract class MappableBlockLoader {
   abstract boolean isTransientCache();
 
   /**
-   * Get a cache file path if applicable. Otherwise return null.
+   * Check whether this is a native pmem cache loader.
    */
-  abstract String getCachedPath(ExtendedBlockId key);
+  abstract boolean isNativeLoader();
+
+  /**
+   * Clean up cache, can be used during DataNode shutdown.
+   */
+  void shutdown() {
+    // Do nothing.
+  }
+
+  /**
+   * Verifies the block's checksum. This is an I/O intensive operation.
+   */
+  protected void verifyChecksum(long length, FileInputStream metaIn,
+      FileChannel blockChannel, String blockFileName) throws IOException {
+    // Verify the checksum from the block's meta file
+    // Get the DataChecksum from the meta file header
+    BlockMetadataHeader header =
+        BlockMetadataHeader.readHeader(new DataInputStream(
+            new BufferedInputStream(metaIn, BlockMetadataHeader
+                .getHeaderSize())));
+    FileChannel metaChannel = null;
+    try {
+      metaChannel = metaIn.getChannel();
+      if (metaChannel == null) {
+        throw new IOException(
+            "Block InputStream meta file has no FileChannel.");
+      }
+      DataChecksum checksum = header.getChecksum();
+      final int bytesPerChecksum = checksum.getBytesPerChecksum();
+      final int checksumSize = checksum.getChecksumSize();
+      final int numChunks = (8 * 1024 * 1024) / bytesPerChecksum;
+      ByteBuffer blockBuf = ByteBuffer.allocate(numChunks * bytesPerChecksum);
+      ByteBuffer checksumBuf = ByteBuffer.allocate(numChunks * checksumSize);
+      // Verify the checksum
+      int bytesVerified = 0;
+      while (bytesVerified < length) {
+        Preconditions.checkState(bytesVerified % bytesPerChecksum == 0,
+            "Unexpected partial chunk before EOF");
+        assert bytesVerified % bytesPerChecksum == 0;
+        int bytesRead = fillBuffer(blockChannel, blockBuf);
+        if (bytesRead == -1) {
+          throw new IOException("checksum verification failed: premature EOF");
+        }
+        blockBuf.flip();
+        // Number of read chunks, including partial chunk at end
+        int chunks = (bytesRead + bytesPerChecksum - 1) / bytesPerChecksum;
+        checksumBuf.limit(chunks * checksumSize);
+        fillBuffer(metaChannel, checksumBuf);
+        checksumBuf.flip();
+        checksum.verifyChunkedSums(blockBuf, checksumBuf, blockFileName,
+            bytesVerified);
+        // Success
+        bytesVerified += bytesRead;
+        blockBuf.clear();
+        checksumBuf.clear();
+      }
+    } finally {
+      IOUtils.closeQuietly(metaChannel);
+    }
+  }
 
   /**
    * Reads bytes into a buffer until EOF or the buffer's limit is reached.

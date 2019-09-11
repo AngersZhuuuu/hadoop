@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.hdds.scm.pipeline;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
@@ -87,7 +88,8 @@ public class SCMPipelineManager implements PipelineManager {
     this.lock = new ReentrantReadWriteLock();
     this.conf = conf;
     this.stateManager = new PipelineStateManager(conf);
-    this.pipelineFactory = new PipelineFactory(nodeManager, stateManager, conf);
+    this.pipelineFactory = new PipelineFactory(nodeManager, stateManager,
+        conf);
     // TODO: See if thread priority needs to be set for these threads
     scheduler = new Scheduler("RatisPipelineUtilsThread", false, 1);
     this.backgroundPipelineCreator =
@@ -115,6 +117,7 @@ public class SCMPipelineManager implements PipelineManager {
     return stateManager;
   }
 
+  @VisibleForTesting
   public void setPipelineProvider(ReplicationType replicationType,
                                   PipelineProvider provider) {
     pipelineFactory.setProvider(replicationType, provider);
@@ -151,6 +154,7 @@ public class SCMPipelineManager implements PipelineManager {
       stateManager.addPipeline(pipeline);
       nodeManager.addPipeline(pipeline);
       metrics.incNumPipelineCreated();
+      metrics.createPerPipelineMetrics(pipeline);
       return pipeline;
     } catch (InsufficientDatanodesException idEx) {
       throw idEx;
@@ -284,7 +288,8 @@ public class SCMPipelineManager implements PipelineManager {
   public void openPipeline(PipelineID pipelineId) throws IOException {
     lock.writeLock().lock();
     try {
-      stateManager.openPipeline(pipelineId);
+      Pipeline pipeline = stateManager.openPipeline(pipelineId);
+      metrics.createPerPipelineMetrics(pipeline);
     } finally {
       lock.writeLock().unlock();
     }
@@ -347,6 +352,30 @@ public class SCMPipelineManager implements PipelineManager {
   }
 
   /**
+   * Activates a dormant pipeline.
+   *
+   * @param pipelineID ID of the pipeline to activate.
+   * @throws IOException in case of any Exception
+   */
+  @Override
+  public void activatePipeline(PipelineID pipelineID)
+      throws IOException {
+    stateManager.activatePipeline(pipelineID);
+  }
+
+  /**
+   * Deactivates an active pipeline.
+   *
+   * @param pipelineID ID of the pipeline to deactivate.
+   * @throws IOException in case of any Exception
+   */
+  @Override
+  public void deactivatePipeline(PipelineID pipelineID)
+      throws IOException {
+    stateManager.deactivatePipeline(pipelineID);
+  }
+
+  /**
    * Moves the pipeline to CLOSED state and sends close container command for
    * all the containers in the pipeline.
    *
@@ -361,6 +390,7 @@ public class SCMPipelineManager implements PipelineManager {
       for (ContainerID containerID : containerIDs) {
         eventPublisher.fireEvent(SCMEvents.CLOSE_CONTAINER, containerID);
       }
+      metrics.removePipelineMetrics(pipelineId);
     } finally {
       lock.writeLock().unlock();
     }
@@ -402,6 +432,11 @@ public class SCMPipelineManager implements PipelineManager {
   }
 
   @Override
+  public void incNumBlocksAllocatedMetric(PipelineID id) {
+    metrics.incNumBlocksAllocated(id);
+  }
+
+  @Override
   public void close() throws IOException {
     if (scheduler != null) {
       scheduler.close();
@@ -419,5 +454,7 @@ public class SCMPipelineManager implements PipelineManager {
     if(metrics != null) {
       metrics.unRegister();
     }
+    // shutdown pipeline provider.
+    pipelineFactory.shutdown();
   }
 }

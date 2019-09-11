@@ -1518,73 +1518,23 @@ public class CapacityScheduler extends
     if (getNode(node.getNodeID()) != node) {
       LOG.error("Trying to schedule on a removed node, please double check, "
           + "nodeId=" + node.getNodeID());
+      ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+          "", getRootQueue().getQueueName(), ActivityState.REJECTED,
+          ActivityDiagnosticConstant.INIT_CHECK_SINGLE_NODE_REMOVED);
+      ActivitiesLogger.NODE.finishSkippedNodeAllocation(activitiesManager,
+          node);
       return null;
     }
-
-    CSAssignment assignment;
 
     // Assign new containers...
     // 1. Check for reserved applications
     // 2. Schedule if there are no reservations
     RMContainer reservedContainer = node.getReservedContainer();
     if (reservedContainer != null) {
-      FiCaSchedulerApp reservedApplication = getCurrentAttemptForContainer(
-          reservedContainer.getContainerId());
-      if (reservedApplication == null) {
-        LOG.error(
-            "Trying to schedule for a finished app, please double check. nodeId="
-                + node.getNodeID() + " container=" + reservedContainer
-                .getContainerId());
-        return null;
-      }
-
-      // Try to fulfill the reservation
-      LOG.debug("Trying to fulfill reservation for application {} on node: {}",
-          reservedApplication.getApplicationId(), node.getNodeID());
-
-      LeafQueue queue = ((LeafQueue) reservedApplication.getQueue());
-      assignment = queue.assignContainers(getClusterResource(), candidates,
-          // TODO, now we only consider limits for parent for non-labeled
-          // resources, should consider labeled resources as well.
-          new ResourceLimits(labelManager
-              .getResourceByLabel(RMNodeLabelsManager.NO_LABEL,
-                  getClusterResource())),
-          SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
-
-      if (assignment.isFulfilledReservation()) {
-        if (withNodeHeartbeat) {
-          // Only update SchedulerHealth in sync scheduling, existing
-          // Data structure of SchedulerHealth need to be updated for
-          // Async mode
-          updateSchedulerHealth(lastNodeUpdateTime, node.getNodeID(),
-              assignment);
-        }
-
-        schedulerHealth.updateSchedulerFulfilledReservationCounts(1);
-
-        ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
-            queue.getParent().getQueueName(), queue.getQueueName(),
-            ActivityState.ACCEPTED, ActivityDiagnosticConstant.EMPTY);
-        ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
-            node, reservedContainer.getContainerId(),
-            AllocationState.ALLOCATED_FROM_RESERVED);
-      } else{
-        ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
-            queue.getParent().getQueueName(), queue.getQueueName(),
-            ActivityState.ACCEPTED, ActivityDiagnosticConstant.EMPTY);
-        ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
-            node, reservedContainer.getContainerId(), AllocationState.SKIPPED);
-      }
-
-      assignment.setSchedulingMode(
-          SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
-      submitResourceCommitRequest(getClusterResource(), assignment);
-    }
-
-    // Do not schedule if there are any reservations to fulfill on the node
-    if (node.getReservedContainer() != null) {
+      allocateFromReservedContainer(node, withNodeHeartbeat, reservedContainer);
+      // Do not schedule if there are any reservations to fulfill on the node
       LOG.debug("Skipping scheduling since node {} is reserved by"
-          + " application {}", node.getNodeID(), node.getReservedContainer().
+          + " application {}", node.getNodeID(), reservedContainer.
           getContainerId().getApplicationAttemptId());
       return null;
     }
@@ -1595,12 +1545,74 @@ public class CapacityScheduler extends
     if (calculator.computeAvailableContainers(Resources
             .add(node.getUnallocatedResource(), node.getTotalKillableResources()),
         minimumAllocation) <= 0) {
-      LOG.debug("This node or node partition doesn't have available or" +
-          " preemptible resource");
+      LOG.debug("This node " + node.getNodeID() + " doesn't have sufficient "
+          + "available or preemptible resource for minimum allocation");
+      ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+          "", getRootQueue().getQueueName(), ActivityState.REJECTED,
+          ActivityDiagnosticConstant.
+              INIT_CHECK_SINGLE_NODE_RESOURCE_INSUFFICIENT);
+      ActivitiesLogger.NODE.finishSkippedNodeAllocation(activitiesManager,
+          node);
       return null;
     }
 
     return allocateOrReserveNewContainers(candidates, withNodeHeartbeat);
+  }
+
+  private void allocateFromReservedContainer(FiCaSchedulerNode node,
+      boolean withNodeHeartbeat, RMContainer reservedContainer) {
+    FiCaSchedulerApp reservedApplication = getCurrentAttemptForContainer(
+        reservedContainer.getContainerId());
+    if (reservedApplication == null) {
+      LOG.error(
+          "Trying to schedule for a finished app, please double check. nodeId="
+              + node.getNodeID() + " container=" + reservedContainer
+              .getContainerId());
+      return;
+    }
+
+    // Try to fulfill the reservation
+    LOG.debug("Trying to fulfill reservation for application {} on node: {}",
+        reservedApplication.getApplicationId(), node.getNodeID());
+
+    LeafQueue queue = ((LeafQueue) reservedApplication.getQueue());
+    CSAssignment assignment = queue.assignContainers(getClusterResource(),
+        new SimpleCandidateNodeSet<>(node),
+        // TODO, now we only consider limits for parent for non-labeled
+        // resources, should consider labeled resources as well.
+        new ResourceLimits(labelManager
+            .getResourceByLabel(RMNodeLabelsManager.NO_LABEL,
+                getClusterResource())),
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+
+    if (assignment.isFulfilledReservation()) {
+      if (withNodeHeartbeat) {
+        // Only update SchedulerHealth in sync scheduling, existing
+        // Data structure of SchedulerHealth need to be updated for
+        // Async mode
+        updateSchedulerHealth(lastNodeUpdateTime, node.getNodeID(),
+            assignment);
+      }
+
+      schedulerHealth.updateSchedulerFulfilledReservationCounts(1);
+
+      ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+          queue.getParent().getQueueName(), queue.getQueueName(),
+          ActivityState.ACCEPTED, ActivityDiagnosticConstant.EMPTY);
+      ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
+          node, reservedContainer.getContainerId(),
+          AllocationState.ALLOCATED_FROM_RESERVED);
+    } else if (assignment.getAssignmentInformation().getNumReservations() > 0) {
+      ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, node,
+          queue.getParent().getQueueName(), queue.getQueueName(),
+          ActivityState.RE_RESERVED, ActivityDiagnosticConstant.EMPTY);
+      ActivitiesLogger.NODE.finishAllocatedNodeAllocation(activitiesManager,
+          node, reservedContainer.getContainerId(), AllocationState.RESERVED);
+    }
+
+    assignment.setSchedulingMode(
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    submitResourceCommitRequest(getClusterResource(), assignment);
   }
 
   private CSAssignment allocateOrReserveNewContainers(
@@ -1674,8 +1686,21 @@ public class CapacityScheduler extends
         && preemptionManager.getKillableResource(
         CapacitySchedulerConfiguration.ROOT, candidates.getPartition())
         == Resources.none()) {
-      LOG.debug("This node or this node partition doesn't have available or"
-          + "killable resource");
+      // Try to allocate from reserved containers
+      for (FiCaSchedulerNode node : candidates.getAllNodes().values()) {
+        RMContainer reservedContainer = node.getReservedContainer();
+        if (reservedContainer != null) {
+          allocateFromReservedContainer(node, false, reservedContainer);
+        }
+      }
+      LOG.debug("This partition '{}' doesn't have available or "
+          + "killable resource", candidates.getPartition());
+      ActivitiesLogger.QUEUE.recordQueueActivity(activitiesManager, null,
+          "", getRootQueue().getQueueName(), ActivityState.REJECTED,
+          ActivityDiagnosticConstant.
+              INIT_CHECK_PARTITION_RESOURCE_INSUFFICIENT);
+      ActivitiesLogger.NODE
+          .finishSkippedNodeAllocation(activitiesManager, null);
       return null;
     }
 
@@ -1706,13 +1731,13 @@ public class CapacityScheduler extends
       assignment = allocateContainerOnSingleNode(candidates,
           node, withNodeHeartbeat);
       ActivitiesLogger.NODE.finishNodeUpdateRecording(activitiesManager,
-          node.getNodeID());
+          node.getNodeID(), candidates.getPartition());
     } else{
       ActivitiesLogger.NODE.startNodeUpdateRecording(activitiesManager,
           ActivitiesManager.EMPTY_NODE_ID);
       assignment = allocateContainersOnMultiNodes(candidates);
       ActivitiesLogger.NODE.finishNodeUpdateRecording(activitiesManager,
-          ActivitiesManager.EMPTY_NODE_ID);
+          ActivitiesManager.EMPTY_NODE_ID, candidates.getPartition());
     }
 
     if (assignment != null && assignment.getAssignmentInformation() != null
@@ -2431,7 +2456,7 @@ public class CapacityScheduler extends
         if (!app.isStopped()) {
           source.finishApplicationAttempt(app, sourceQueueName);
           // Submit to a new queue
-          dest.submitApplicationAttempt(app, user);
+          dest.submitApplicationAttempt(app, user, true);
         }
         // Finish app & update metrics
         app.move(dest);
@@ -2660,6 +2685,7 @@ public class CapacityScheduler extends
           rmApp.getApplicationSubmissionContext(), rmApp.getUser(),
           rmApp.getCallerContext());
       appState.setApplicationTimeouts(rmApp.getApplicationTimeouts());
+      appState.setLaunchTime(rmApp.getLaunchTime());
       rmContext.getStateStore().updateApplicationStateSynchronously(appState,
           false, future);
 
@@ -3090,7 +3116,8 @@ public class CapacityScheduler extends
       // check only for maximum, that's enough because default can't
       // exceed maximum
       if (maximumApplicationLifetime <= 0) {
-        return lifetimeRequestedByApp;
+        return (lifetimeRequestedByApp <= 0) ? defaultApplicationLifetime :
+            lifetimeRequestedByApp;
       }
 
       if (lifetimeRequestedByApp <= 0) {
@@ -3169,5 +3196,13 @@ public class CapacityScheduler extends
   @Override
   public void resetSchedulerMetrics() {
     CapacitySchedulerMetrics.destroy();
+  }
+
+  public boolean isMultiNodePlacementEnabled() {
+    return multiNodePlacementEnabled;
+  }
+
+  public int getNumAsyncSchedulerThreads() {
+    return asyncSchedulerThreads == null ? 0 : asyncSchedulerThreads.size();
   }
 }

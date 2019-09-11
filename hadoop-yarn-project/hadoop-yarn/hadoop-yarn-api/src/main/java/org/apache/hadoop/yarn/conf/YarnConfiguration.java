@@ -402,6 +402,17 @@ public class YarnConfiguration extends Configuration {
   public static final boolean
       DEFAULT_OPPORTUNISTIC_CONTAINER_ALLOCATION_ENABLED = false;
 
+  /**
+   * Maximum number of opportunistic containers to be allocated in
+   * AM heartbeat.
+   */
+  @Unstable
+  public static final String
+      OPP_CONTAINER_MAX_ALLOCATIONS_PER_AM_HEARTBEAT =
+      RM_PREFIX + "opportunistic.max.container-allocation.per.am.heartbeat";
+  public static final int
+      DEFAULT_OPP_CONTAINER_MAX_ALLOCATIONS_PER_AM_HEARTBEAT = -1;
+
   /** Number of nodes to be used by the Opportunistic Container allocator for
    * dispatching containers during container allocation. */
   @Unstable
@@ -532,6 +543,24 @@ public class YarnConfiguration extends Configuration {
   public static final String RM_NODES_INCLUDE_FILE_PATH = 
     RM_PREFIX + "nodes.include-path";
   public static final String DEFAULT_RM_NODES_INCLUDE_FILE_PATH = "";
+
+  /** Enable submission pre-processor.*/
+  public static final String RM_SUBMISSION_PREPROCESSOR_ENABLED =
+      RM_PREFIX + "submission-preprocessor.enabled";
+  public static final boolean DEFAULT_RM_SUBMISSION_PREPROCESSOR_ENABLED =
+      false;
+
+  /** Path to file with hosts for the submission processor to handle.*/
+  public static final String RM_SUBMISSION_PREPROCESSOR_FILE_PATH =
+      RM_PREFIX + "submission-preprocessor.file-path";
+  public static final String DEFAULT_RM_SUBMISSION_PREPROCESSOR_FILE_PATH =
+      "";
+
+  /** Submission processor refresh interval.*/
+  public static final String RM_SUBMISSION_PREPROCESSOR_REFRESH_INTERVAL_MS =
+      RM_PREFIX + "submission-preprocessor.file-refresh-interval-ms";
+  public static final int
+      DEFAULT_RM_SUBMISSION_PREPROCESSOR_REFRESH_INTERVAL_MS = 0;
   
   /** Path to file with nodes to exclude.*/
   public static final String RM_NODES_EXCLUDE_FILE_PATH = 
@@ -1359,6 +1388,11 @@ public class YarnConfiguration extends Configuration {
   public static final String LOG_AGGREGATION_RETAIN_SECONDS = YARN_PREFIX
       + "log-aggregation.retain-seconds";
   public static final long DEFAULT_LOG_AGGREGATION_RETAIN_SECONDS = -1;
+
+  public static final String LOG_AGGREGATION_DEBUG_FILESIZE = YARN_PREFIX
+      + "log-aggregation.debug.filesize";
+  public static final long DEFAULT_LOG_AGGREGATION_DEBUG_FILESIZE
+      = 100 * 1024 * 1024;
   
   /**
    * How long to wait between aggregated log retention checks. If set to
@@ -1401,6 +1435,14 @@ public class YarnConfiguration extends Configuration {
       DEFAULT_NM_LOG_AGGREGATION_ROLL_MONITORING_INTERVAL_SECONDS = -1;
 
   /**
+   * The allowed hard minimum limit for {@link
+   * YarnConfiguration#NM_LOG_AGGREGATION_ROLL_MONITORING_INTERVAL_SECONDS}.
+   */
+  public static final String MIN_LOG_ROLLING_INTERVAL_SECONDS = NM_PREFIX
+      + "log-aggregation.roll-monitoring-interval-seconds.min";
+  public static final long MIN_LOG_ROLLING_INTERVAL_SECONDS_DEFAULT = 3600;
+
+  /**
    * Define how many aggregated log files per application per NM we can have
    * in remote file system.
    */
@@ -1423,12 +1465,19 @@ public class YarnConfiguration extends Configuration {
   public static final String DEFAULT_NM_REMOTE_APP_LOG_DIR = "/tmp/logs";
 
   /**
-   * The remote log dir will be created at
-   * NM_REMOTE_APP_LOG_DIR/${user}/NM_REMOTE_APP_LOG_DIR_SUFFIX/${appId}
+   * The remote log dir will be created at below location.
+   * NM_REMOTE_APP_LOG_DIR/${user}/bucket_{NM_REMOTE_APP_LOG_DIR_SUFFIX}
+   * /${bucketDir}/${appId}
    */
   public static final String NM_REMOTE_APP_LOG_DIR_SUFFIX = 
     NM_PREFIX + "remote-app-log-dir-suffix";
   public static final String DEFAULT_NM_REMOTE_APP_LOG_DIR_SUFFIX="logs";
+
+  /** Specifies whether Older Application Log Directory is included. */
+  public static final String NM_REMOTE_APP_LOG_DIR_INCLUDE_OLDER =
+      NM_PREFIX + "remote-app-log-dir-include-older";
+  public static final boolean DEFAULT_NM_REMOTE_APP_LOG_DIR_INCLUDE_OLDER =
+      true;
 
   public static final String YARN_LOG_SERVER_URL =
     YARN_PREFIX + "log.server.url";
@@ -1452,7 +1501,7 @@ public class YarnConfiguration extends Configuration {
       + "pmem-check-enabled";
   public static final boolean DEFAULT_NM_PMEM_CHECK_ENABLED = true;
 
-  /** Specifies whether physical memory check is enabled. */
+  /** Specifies whether virtual memory check is enabled. */
   public static final String NM_VMEM_CHECK_ENABLED = NM_PREFIX
       + "vmem-check-enabled";
   public static final boolean DEFAULT_NM_VMEM_CHECK_ENABLED = true;
@@ -1615,6 +1664,20 @@ public class YarnConfiguration extends Configuration {
   @Private
   public static final String NM_RESOURCE_PLUGINS =
       NM_PREFIX + "resource-plugins";
+
+
+  /**
+   * Specifies whether the initialization of the Node Manager should continue
+   * if a certain device (GPU, FPGA, etc) was not found in the system. If set
+   * to "true", then an exception will be thrown if a device is missing or
+   * an error occurred during discovery.
+   */
+  @Private
+  public static final String NM_RESOURCE_PLUGINS_FAIL_FAST =
+      NM_RESOURCE_PLUGINS + ".fail-fast";
+
+  @Private
+  public static final boolean DEFAULT_NM_RESOURCE_PLUGINS_FAIL_FAST = true;
 
   /**
    * This setting controls if pluggable device plugin framework is enabled.
@@ -2437,6 +2500,20 @@ public class YarnConfiguration extends Configuration {
       YARN_PREFIX + "dispatcher.drain-events.timeout";
 
   public static final long DEFAULT_DISPATCHER_DRAIN_EVENTS_TIMEOUT = 300000;
+
+  /**
+   * The threshold used to trigger the logging of event types and counts
+   *  in RM's main event dispatcher. Default value is 5000,
+   *  which means RM will print events info when the queue size cumulatively
+   *  reaches 5000 every time. Such info can be used to reveal what
+   *  kind of events that RM is stuck at processing mostly,
+   *  it can help to narrow down certain performance issues.
+   */
+  public static final String
+          YARN_DISPATCHER_PRINT_EVENTS_INFO_THRESHOLD =
+          YARN_PREFIX + "dispatcher.print-events-info.threshold";
+  public static final int
+          DEFAULT_YARN_DISPATCHER_PRINT_EVENTS_INFO_THRESHOLD = 5000;
 
   /**
    * CLASSPATH for YARN applications. A comma-separated list of CLASSPATH
@@ -3883,6 +3960,10 @@ public class YarnConfiguration extends Configuration {
   public static final boolean DEFAULT_DISPLAY_APPS_FOR_LOGGED_IN_USER =
       false;
 
+  public static final String FILTER_INVALID_XML_CHARS =
+      "yarn.webapp.filter-invalid-xml-chars";
+  public static final boolean DEFAULT_FILTER_INVALID_XML_CHARS = false;
+
   // RM and NM CSRF props
   public static final String REST_CSRF = "webapp.rest-csrf.";
   public static final String RM_CSRF_PREFIX = RM_PREFIX + REST_CSRF;
@@ -3986,6 +4067,47 @@ public class YarnConfiguration extends Configuration {
       + "numa-awareness.numactl.cmd";
   public static final String DEFAULT_NM_NUMA_AWARENESS_NUMACTL_CMD =
       "/usr/bin/numactl";
+
+  /**
+   * Settings for activities manager.
+   */
+  public static final String RM_ACTIVITIES_MANAGER_PREFIX =
+      RM_PREFIX + "activities-manager.";
+  public static final String RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_PREFIX =
+      RM_ACTIVITIES_MANAGER_PREFIX + "scheduler-activities.";
+  public static final String RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_PREFIX =
+      RM_ACTIVITIES_MANAGER_PREFIX + "app-activities.";
+
+  /** The cleanup interval for activities in milliseconds. **/
+  public static final String RM_ACTIVITIES_MANAGER_CLEANUP_INTERVAL_MS =
+      RM_ACTIVITIES_MANAGER_PREFIX + "cleanup-interval-ms";
+  public static final long DEFAULT_RM_ACTIVITIES_MANAGER_CLEANUP_INTERVAL_MS =
+      5000L;
+
+  /** Time to live for scheduler activities in milliseconds. **/
+  public static final String RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_TTL_MS =
+      RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_PREFIX + "ttl-ms";
+  public static final long
+      DEFAULT_RM_ACTIVITIES_MANAGER_SCHEDULER_ACTIVITIES_TTL_MS = 600000L;
+
+  /** Time to live for app activities in milliseconds. **/
+  public static final String RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_TTL_MS =
+      RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_PREFIX + "ttl-ms";
+  public static final long DEFAULT_RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_TTL_MS =
+      600000L;
+
+  /** Max queue length for app activities. **/
+  public static final String
+      RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_MAX_QUEUE_LENGTH =
+      RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_PREFIX + "max-queue-length";
+  public static final int
+      DEFAULT_RM_ACTIVITIES_MANAGER_APP_ACTIVITIES_MAX_QUEUE_LENGTH = 100;
+
+  /**
+   * Containers launcher implementation to use.
+   */
+  public static final String NM_CONTAINERS_LAUNCHER_CLASS =
+      NM_PREFIX + "containers-launcher.class";
 
   public YarnConfiguration() {
     super();

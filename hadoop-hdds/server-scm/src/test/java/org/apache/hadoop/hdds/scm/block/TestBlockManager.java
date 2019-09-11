@@ -19,7 +19,13 @@ package org.apache.hadoop.hdds.scm.block;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
+
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
@@ -37,8 +43,6 @@ import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
 import org.apache.hadoop.hdds.scm.server.SCMConfigurator;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
-import org.apache.hadoop.hdds.server.events.EventHandler;
-import org.apache.hadoop.hdds.server.events.EventPublisher;
 import org.apache.hadoop.hdds.server.events.EventQueue;
 import org.apache.hadoop.ozone.container.common.SCMTestUtils;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -57,7 +61,7 @@ import static org.apache.hadoop.ozone.OzoneConsts.MB;
 /**
  * Tests for SCM Block Manager.
  */
-public class TestBlockManager implements EventHandler<Boolean> {
+public class TestBlockManager {
   private StorageContainerManager scm;
   private SCMContainerManager mapping;
   private MockNodeManager nodeManager;
@@ -103,7 +107,8 @@ public class TestBlockManager implements EventHandler<Boolean> {
     eventQueue = new EventQueue();
     eventQueue.addHandler(SCMEvents.SAFE_MODE_STATUS,
         scm.getSafeModeHandler());
-    eventQueue.addHandler(SCMEvents.START_REPLICATION, this);
+    eventQueue.addHandler(SCMEvents.SAFE_MODE_STATUS,
+        scm.getSafeModeHandler());
     CloseContainerEventHandler closeContainerHandler =
         new CloseContainerEventHandler(pipelineManager, mapping);
     eventQueue.addHandler(SCMEvents.CLOSE_CONTAINER, closeContainerHandler);
@@ -131,6 +136,43 @@ public class TestBlockManager implements EventHandler<Boolean> {
     AllocatedBlock block = blockManager.allocateBlock(DEFAULT_BLOCK_SIZE,
         type, factor, containerOwner, new ExcludeList());
     Assert.assertNotNull(block);
+  }
+
+  @Test
+  public void testAllocateBlockInParallel() throws Exception {
+    eventQueue.fireEvent(SCMEvents.SAFE_MODE_STATUS, safeModeStatus);
+    GenericTestUtils.waitFor(() -> {
+      return !blockManager.isScmInSafeMode();
+    }, 10, 1000 * 5);
+    int threadCount = 20;
+    List<ExecutorService> executors = new ArrayList<>(threadCount);
+    for (int i = 0; i < threadCount; i++) {
+      executors.add(Executors.newSingleThreadExecutor());
+    }
+    List<CompletableFuture<AllocatedBlock>> futureList =
+        new ArrayList<>(threadCount);
+    for (int i = 0; i < threadCount; i++) {
+      final CompletableFuture<AllocatedBlock> future =
+          new CompletableFuture<>();
+      CompletableFuture.supplyAsync(() -> {
+        try {
+          future.complete(blockManager
+              .allocateBlock(DEFAULT_BLOCK_SIZE, type, factor, containerOwner,
+                  new ExcludeList()));
+        } catch (IOException e) {
+          future.completeExceptionally(e);
+        }
+        return future;
+      }, executors.get(i));
+      futureList.add(future);
+    }
+    try {
+      CompletableFuture
+          .allOf(futureList.toArray(new CompletableFuture[futureList.size()]))
+          .get();
+    } catch (Exception e) {
+      Assert.fail("testAllocateBlockInParallel failed");
+    }
   }
 
   @Test
@@ -282,8 +324,4 @@ public class TestBlockManager implements EventHandler<Boolean> {
     Assert.assertEquals(1, pipelineManager.getPipelines(type, factor).size());
   }
 
-  @Override
-  public void onMessage(Boolean aBoolean, EventPublisher publisher) {
-    System.out.println("test");
-  }
 }

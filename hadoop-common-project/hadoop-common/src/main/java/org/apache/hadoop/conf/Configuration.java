@@ -30,7 +30,6 @@ import java.io.BufferedInputStream;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -43,6 +42,7 @@ import java.net.InetSocketAddress;
 import java.net.JarURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -1840,7 +1840,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       TimeUnit defaultUnit, TimeUnit returnUnit) {
     String vStr = get(name);
     if (null == vStr) {
-      return defaultValue;
+      return returnUnit.convert(defaultValue, defaultUnit);
     } else {
       return getTimeDurationHelper(name, vStr, defaultUnit, returnUnit);
     }
@@ -1885,8 +1885,6 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     vStr = StringUtils.toLowerCase(vStr);
     ParsedTimeDuration vUnit = ParsedTimeDuration.unitFor(vStr);
     if (null == vUnit) {
-      logDeprecation("No unit for " + name + "(" + vStr + ") assuming " +
-          defaultUnit);
       vUnit = ParsedTimeDuration.unitFor(defaultUnit);
     } else {
       vStr = vStr.substring(0, vStr.lastIndexOf(vUnit.suffix()));
@@ -3075,7 +3073,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
           LOG.debug("parsing File " + file);
         }
         reader = (XMLStreamReader2)parse(new BufferedInputStream(
-            new FileInputStream(file)), ((Path)resource).toString(),
+            Files.newInputStream(file.toPath())), ((Path) resource).toString(),
             isRestricted);
       }
     } else if (resource instanceof InputStream) {
@@ -3436,8 +3434,10 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   }
 
   private void overlay(Properties to, Properties from) {
-    for (Entry<Object, Object> entry: from.entrySet()) {
-      to.put(entry.getKey(), entry.getValue());
+    synchronized (from) {
+      for (Entry<Object, Object> entry : from.entrySet()) {
+        to.put(entry.getKey(), entry.getValue());
+      }
     }
   }
 

@@ -27,15 +27,15 @@ import org.apache.hadoop.hdds.protocol.proto
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .StorageContainerException;
 import org.apache.hadoop.ozone.container.common.interfaces.Container;
-import org.apache.hadoop.ozone.container.common
-    .interfaces.ContainerDeletionChoosingPolicy;
+import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Set;
+import java.util.List;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -68,6 +68,8 @@ public class ContainerSet {
     if(containerMap.putIfAbsent(containerId, container) == null) {
       LOG.debug("Container with container Id {} is added to containerMap",
           containerId);
+      // wish we could have done this from ContainerData.setState
+      container.getContainerData().commitSpace();
       return true;
     } else {
       LOG.warn("Container already exists with container Id {}", containerId);
@@ -127,6 +129,24 @@ public class ContainerSet {
   }
 
   /**
+   * Return an iterator of containers associated with the specified volume.
+   *
+   * @param  volume the HDDS volume which should be used to filter containers
+   * @return {@literal Iterator<Container>}
+   */
+  public Iterator<Container> getContainerIterator(HddsVolume volume) {
+    Preconditions.checkNotNull(volume);
+    Preconditions.checkNotNull(volume.getStorageID());
+    String volumeUuid = volume.getStorageID();
+    return containerMap.values()
+                       .stream()
+                       .filter(x -> volumeUuid.equals(
+                               x.getContainerData().getVolume()
+                                       .getStorageID()))
+                       .iterator();
+  }
+
+  /**
    * Return an containerMap iterator over {@link ContainerSet#containerMap}.
    * @return containerMap Iterator
    */
@@ -142,6 +162,10 @@ public class ContainerSet {
   @VisibleForTesting
   public Map<Long, Container> getContainerMapCopy() {
     return ImmutableMap.copyOf(containerMap);
+  }
+
+  public Map<Long, Container> getContainerMap() {
+    return Collections.unmodifiableMap(containerMap);
   }
 
   /**
@@ -211,31 +235,51 @@ public class ContainerSet {
     return crBuilder.build();
   }
 
-  public List<ContainerData> chooseContainerForBlockDeletion(int count,
-      ContainerDeletionChoosingPolicy deletionPolicy)
-      throws StorageContainerException {
-    Map<Long, ContainerData> containerDataMap = containerMap.entrySet().stream()
-        .filter(e -> deletionPolicy.isValidContainerType(
-            e.getValue().getContainerType()))
-        .collect(Collectors.toMap(Map.Entry::getKey,
-            e -> e.getValue().getContainerData()));
-    return deletionPolicy
-        .chooseContainerForBlockDeletion(count, containerDataMap);
-  }
-
   public Set<Long> getMissingContainerSet() {
     return missingContainerSet;
   }
 
   /**
-   * Builds the missing container set by taking a diff total no containers
-   * actually found and number of containers which actually got created.
+   * Builds the missing container set by taking a diff between total no
+   * containers actually found and number of containers which actually
+   * got created. It also validates the BCSID stored in the snapshot file
+   * for each container as against what is reported in containerScan.
    * This will only be called during the initialization of Datanode Service
    * when  it still not a part of any write Pipeline.
-   * @param createdContainerSet ContainerId set persisted in the Ratis snapshot
+   * @param container2BCSIDMap Map of containerId to BCSID persisted in the
+   *                           Ratis snapshot
    */
-  public void buildMissingContainerSet(Set<Long> createdContainerSet) {
-    missingContainerSet.addAll(createdContainerSet);
-    missingContainerSet.removeAll(containerMap.keySet());
+  public void buildMissingContainerSetAndValidate(
+      Map<Long, Long> container2BCSIDMap) {
+    container2BCSIDMap.entrySet().parallelStream().forEach((mapEntry) -> {
+      long id = mapEntry.getKey();
+      if (!containerMap.containsKey(id)) {
+        LOG.warn("Adding container {} to missing container set.", id);
+        missingContainerSet.add(id);
+      } else {
+        Container container = containerMap.get(id);
+        long containerBCSID = container.getBlockCommitSequenceId();
+        long snapshotBCSID = mapEntry.getValue();
+        if (containerBCSID < snapshotBCSID) {
+          LOG.warn(
+              "Marking container {} unhealthy as reported BCSID {} is smaller"
+                  + " than ratis snapshot recorded value {}", id,
+              containerBCSID, snapshotBCSID);
+          // just mark the container unhealthy. Once the DatanodeStateMachine
+          // thread starts it will send container report to SCM where these
+          // unhealthy containers would be detected
+          try {
+            container.markContainerUnhealthy();
+          } catch (StorageContainerException sce) {
+            // The container will still be marked unhealthy in memory even if
+            // exception occurs. It won't accept any new transactions and will
+            // be handled by SCM. Eve if dn restarts, it will still be detected
+            // as unheathy as its BCSID won't change.
+            LOG.error("Unable to persist unhealthy state for container {}", id);
+          }
+        }
+      }
+    });
+
   }
 }

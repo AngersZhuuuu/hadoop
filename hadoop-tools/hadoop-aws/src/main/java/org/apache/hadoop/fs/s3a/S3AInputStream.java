@@ -128,23 +128,22 @@ public class S3AInputStream extends FSInputStream implements  CanSetReadahead,
    * This does not attempt to open it; that is only done on the first
    * actual read() operation.
    * @param ctx operation context
-   * @param s3Attributes object attributes from a HEAD request
-   * @param contentLength length of content
+   * @param s3Attributes object attributes
    * @param client S3 client to use
    */
   public S3AInputStream(S3AReadOpContext ctx,
       S3ObjectAttributes s3Attributes,
-      long contentLength,
       AmazonS3 client) {
     Preconditions.checkArgument(isNotEmpty(s3Attributes.getBucket()),
         "No Bucket");
     Preconditions.checkArgument(isNotEmpty(s3Attributes.getKey()), "No Key");
-    Preconditions.checkArgument(contentLength >= 0, "Negative content length");
+    long l = s3Attributes.getLen();
+    Preconditions.checkArgument(l >= 0, "Negative content length");
     this.context = ctx;
     this.bucket = s3Attributes.getBucket();
     this.key = s3Attributes.getKey();
     this.pathStr = ctx.dstFileStatus.getPath().toString();
-    this.contentLength = contentLength;
+    this.contentLength = l;
     this.client = client;
     this.uri = "s3a://" + this.bucket + "/" + this.key;
     this.streamStatistics = ctx.instrumentation.newInputStreamStatistics();
@@ -153,7 +152,8 @@ public class S3AInputStream extends FSInputStream implements  CanSetReadahead,
     this.serverSideEncryptionKey = s3Attributes.getServerSideEncryptionKey();
     this.changeTracker = new ChangeTracker(uri,
         ctx.getChangeDetectionPolicy(),
-        streamStatistics.getVersionMismatchCounter());
+        streamStatistics.getVersionMismatchCounter(),
+        s3Attributes);
     setInputPolicy(ctx.getInputPolicy());
     setReadahead(ctx.getReadahead());
   }
@@ -344,9 +344,12 @@ public class S3AInputStream extends FSInputStream implements  CanSetReadahead,
   private void lazySeek(long targetPos, long len) throws IOException {
 
     // With S3Guard, the metadatastore gave us metadata for the file in
-    // open(), so we use a slightly different retry policy.
+    // open(), so we use a slightly different retry policy, but only on initial
+    // open.  After that, an exception generally means the file has changed
+    // and there is no point retrying anymore.
     Invoker invoker = context.getReadInvoker();
-    invoker.retry("lazySeek", pathStr, true,
+    invoker.maybeRetry(streamStatistics.openOperations == 0,
+        "lazySeek", pathStr, true,
         () -> {
           //For lazy seek
           seekInStream(targetPos, len);
@@ -819,9 +822,17 @@ public class S3AInputStream extends FSInputStream implements  CanSetReadahead,
     }
   }
 
+  /**
+   * Closes the underlying S3 stream, and merges the {@link #streamStatistics}
+   * instance associated with the stream.
+   */
   @Override
   public synchronized void unbuffer() {
-    closeStream("unbuffer()", contentRangeFinish, false);
+    try {
+      closeStream("unbuffer()", contentRangeFinish, false);
+    } finally {
+      streamStatistics.merge(false);
+    }
   }
 
   @Override

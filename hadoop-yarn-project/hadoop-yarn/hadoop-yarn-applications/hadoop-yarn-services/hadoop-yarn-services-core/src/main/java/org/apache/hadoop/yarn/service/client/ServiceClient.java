@@ -57,6 +57,7 @@ import org.apache.hadoop.yarn.client.api.YarnClientApplication;
 import org.apache.hadoop.yarn.client.cli.ApplicationCLI;
 import org.apache.hadoop.yarn.client.util.YarnClientUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.proto.ClientAMProtocol.CancelUpgradeRequestProto;
@@ -1202,6 +1203,9 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
       jvmOpts += DEFAULT_AM_JVM_XMX;
     }
 
+    // validate possible command injection.
+    ServiceApiUtil.validateJvmOpts(jvmOpts);
+
     CLI.setJVMOpts(jvmOpts);
     if (hasSliderAMLog4j) {
       CLI.sysprop(SYSPROP_LOG4J_CONFIGURATION, YARN_SERVICE_LOG4J_FILENAME);
@@ -1234,11 +1238,15 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
     return cmdStr;
   }
 
-  private Map<String, String> addAMEnv() throws IOException {
+  @VisibleForTesting
+  protected Map<String, String> addAMEnv() throws IOException {
     Map<String, String> env = new HashMap<>();
-    ClasspathConstructor classpath =
-        buildClasspath(YarnServiceConstants.SUBMITTED_CONF_DIR, "lib", fs, getConfig()
-            .getBoolean(YarnConfiguration.IS_MINI_YARN_CLUSTER, false));
+    ClasspathConstructor classpath = buildClasspath(
+        YarnServiceConstants.SUBMITTED_CONF_DIR,
+        "lib",
+        fs,
+        getConfig().get(YarnServiceConf.YARN_SERVICE_CLASSPATH, ""),
+        getConfig().getBoolean(YarnConfiguration.IS_MINI_YARN_CLUSTER, false));
     env.put("CLASSPATH", classpath.buildClasspath());
     env.put("LANG", "en_US.UTF-8");
     env.put("LC_ALL", "en_US.UTF-8");
@@ -1343,7 +1351,7 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
       LOG.info("Persisted service " + service.getName() + " at " + appJson);
       return appId;
     } else {
-      LOG.info("Finalize service {} upgrade");
+      LOG.info("Finalize service {} upgrade", serviceName);
       ApplicationId appId = getAppId(serviceName);
       ApplicationReport appReport = yarnClient.getApplicationReport(appId);
       if (StringUtils.isEmpty(appReport.getHost())) {
@@ -1554,7 +1562,17 @@ public class ServiceClient extends AppAdminClient implements SliderExitCodes,
       return appSpec;
     }
     appSpec.setId(currentAppId.toString());
-    ApplicationReport appReport = yarnClient.getApplicationReport(currentAppId);
+    ApplicationReport appReport = null;
+    try {
+      appReport = yarnClient.getApplicationReport(currentAppId);
+    } catch (ApplicationNotFoundException e) {
+      LOG.info("application ID {} doesn't exist", currentAppId);
+      return appSpec;
+    }
+    if (appReport == null) {
+      LOG.warn("application ID {} is reported as null", currentAppId);
+      return appSpec;
+    }
     appSpec.setState(convertState(appReport.getYarnApplicationState()));
     ApplicationTimeout lifetime =
         appReport.getApplicationTimeouts().get(ApplicationTimeoutType.LIFETIME);

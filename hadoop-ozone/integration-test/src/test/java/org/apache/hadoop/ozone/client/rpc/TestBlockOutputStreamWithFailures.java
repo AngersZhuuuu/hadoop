@@ -24,8 +24,8 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
 import org.apache.hadoop.hdds.scm.XceiverClientManager;
 import org.apache.hadoop.hdds.scm.XceiverClientMetrics;
 import org.apache.hadoop.hdds.scm.XceiverClientRatis;
-import org.apache.hadoop.hdds.scm.container.common.helpers
-    .ContainerNotOpenException;
+import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
+import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerNotOpenException;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.storage.BlockOutputStream;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
@@ -36,6 +36,7 @@ import org.apache.hadoop.ozone.client.OzoneClientFactory;
 import org.apache.hadoop.ozone.client.io.KeyOutputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.container.ContainerTestHelper;
+import org.apache.ratis.protocol.GroupMismatchException;
 import org.apache.ratis.protocol.RaftRetryFailureException;
 import org.junit.After;
 import org.junit.Assert;
@@ -81,21 +82,18 @@ public class TestBlockOutputStreamWithFailures {
     flushSize = 2 * chunkSize;
     maxFlushSize = 2 * flushSize;
     blockSize = 2 * maxFlushSize;
-    conf.set(OzoneConfigKeys.OZONE_CLIENT_WATCH_REQUEST_TIMEOUT, "5000ms");
+    conf.set(OzoneConfigKeys.OZONE_CLIENT_WATCH_REQUEST_TIMEOUT, "1s");
     conf.setTimeDuration(HDDS_SCM_WATCHER_TIMEOUT, 1000, TimeUnit.MILLISECONDS);
-    conf.setTimeDuration(OZONE_SCM_STALENODE_INTERVAL, 3, TimeUnit.SECONDS);
+    conf.setTimeDuration(OZONE_SCM_STALENODE_INTERVAL, 5, TimeUnit.SECONDS);
     conf.set(OzoneConfigKeys.OZONE_CLIENT_CHECKSUM_TYPE, "NONE");
     conf.setQuietMode(false);
     conf.setStorageSize(OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE, 4,
         StorageUnit.MB);
-    cluster = MiniOzoneCluster.newBuilder(conf)
-        .setNumDatanodes(7)
-        .setBlockSize(blockSize)
-        .setChunkSize(chunkSize)
+    cluster = MiniOzoneCluster.newBuilder(conf).setNumDatanodes(7)
+        .setBlockSize(blockSize).setChunkSize(chunkSize)
         .setStreamBufferFlushSize(flushSize)
         .setStreamBufferMaxSize(maxFlushSize)
-        .setStreamBufferSizeUnit(StorageUnit.BYTES)
-        .build();
+        .setStreamBufferSizeUnit(StorageUnit.BYTES).build();
     cluster.waitForClusterToBeReady();
     //the easiest way to create an open container is creating a key
     client = OzoneClientFactory.getClient(conf);
@@ -122,17 +120,18 @@ public class TestBlockOutputStreamWithFailures {
   }
 
   @Test
-  public void testWatchForCommitWithCloseContainerException() throws Exception {
+  public void testWatchForCommitWithCloseContainerException()
+      throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
@@ -155,15 +154,14 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
 
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -199,8 +197,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // flush is a sync call, all pending operations will complete
     Assert.assertEquals(pendingWriteChunkCount,
@@ -233,9 +230,8 @@ public class TestBlockOutputStreamWithFailures {
     // rewritten plus one partial chunk plus two putBlocks for flushSize
     // and one flush for partial chunk
     key.flush();
-
     Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof ContainerNotOpenException);
 
     // Make sure the retryCount is reset after the exception is handled
@@ -247,8 +243,7 @@ public class TestBlockOutputStreamWithFailures {
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
     Assert.assertEquals(0, keyOutputStream.getStreamEntries().size());
     Assert.assertEquals(pendingWriteChunkCount,
@@ -259,8 +254,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 8,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 22,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 22, metrics.getTotalOpCount());
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     validateData(keyName, dataString.concat(dataString).getBytes());
@@ -270,14 +264,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testWatchForCommitDatanodeFailure() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
@@ -299,14 +293,13 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -344,8 +337,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -376,8 +368,7 @@ public class TestBlockOutputStreamWithFailures {
     Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
     // now close the stream, It will update the ack length after watchForCommit
     key.close();
-    Assert
-        .assertEquals(blockSize, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(blockSize, blockOutputStream.getTotalAckDataLength());
     // Make sure the retryCount is reset after the exception is handled
     Assert.assertTrue(keyOutputStream.getRetryCount() == 0);
     // make sure the bufferPool is empty
@@ -396,8 +387,7 @@ public class TestBlockOutputStreamWithFailures {
     // 4 flushes at flushSize boundaries + 2 flush for partial chunks
     Assert.assertEquals(putBlockCount + 6,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 16,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 16, metrics.getTotalOpCount());
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     validateData(keyName, dataString.concat(dataString).getBytes());
@@ -407,14 +397,14 @@ public class TestBlockOutputStreamWithFailures {
   public void test2DatanodesFailure() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
@@ -436,14 +426,13 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -479,8 +468,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -512,8 +500,19 @@ public class TestBlockOutputStreamWithFailures {
     // rewritten plus one partial chunk plus two putBlocks for flushSize
     // and one flush for partial chunk
     key.flush();
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
-        .getIoException()) instanceof RaftRetryFailureException);
+
+    Throwable ioException = HddsClientUtils.checkForException(
+        blockOutputStream.getIoException());
+    // Since, 2 datanodes went down,
+    // a) if the pipeline gets destroyed quickly it will hit
+    //    GroupMismatchException.
+    // b) will hit close container exception if the container is closed
+    //    but pipeline is still not destroyed.
+    // c) will fail with RaftRetryFailureException if the leader election
+    //    did not finish before the request retry count finishes.
+    Assert.assertTrue(ioException instanceof RaftRetryFailureException
+        || ioException instanceof GroupMismatchException
+        || ioException instanceof ContainerNotOpenException);
     // Make sure the retryCount is reset after the exception is handled
     Assert.assertTrue(keyOutputStream.getRetryCount() == 0);
     // now close the stream, It will update the ack length after watchForCommit
@@ -522,8 +521,7 @@ public class TestBlockOutputStreamWithFailures {
     key.close();
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
     Assert.assertEquals(pendingWriteChunkCount,
         metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk));
@@ -533,15 +531,13 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 8,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 22,
-        metrics.getTotalOpCount());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(totalOpCount + 22, metrics.getTotalOpCount());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
-    Assert.assertEquals(0, keyOutputStream.getStreamEntries().size());
+    Assert.assertEquals(0, keyOutputStream.getLocationInfoList().size());
     validateData(keyName, data1);
   }
 
@@ -549,14 +545,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testFailureWithPrimeSizedData() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
@@ -577,24 +573,21 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 1,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 1, metrics.getTotalOpCount());
 
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
-
 
     Assert.assertEquals(2, blockOutputStream.getBufferPool().getSize());
     Assert.assertEquals(dataLength, blockOutputStream.getWrittenDataLength());
 
-    Assert.assertEquals(0,
-        blockOutputStream.getTotalDataFlushedLength());
+    Assert.assertEquals(0, blockOutputStream.getTotalDataFlushedLength());
 
     Assert.assertTrue(blockOutputStream.getTotalAckDataLength() == 0);
 
@@ -613,8 +606,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 1,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 3,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 3, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -641,7 +633,7 @@ public class TestBlockOutputStreamWithFailures {
     key.flush();
 
     Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof ContainerNotOpenException);
     // Make sure the retryCount is reset after the exception is handled
     Assert.assertTrue(keyOutputStream.getRetryCount() == 0);
@@ -653,8 +645,7 @@ public class TestBlockOutputStreamWithFailures {
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
     Assert.assertEquals(pendingWriteChunkCount,
         metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk));
@@ -664,9 +655,8 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 9,
-        metrics.getTotalOpCount());
-    Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 0);
+    Assert.assertEquals(totalOpCount + 9, metrics.getTotalOpCount());
+    Assert.assertTrue(keyOutputStream.getLocationInfoList().size() == 0);
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     validateData(keyName, dataString.concat(dataString).getBytes());
@@ -676,14 +666,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testExceptionDuringClose() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key = createKey(keyName, ReplicationType.RATIS, 0);
@@ -704,24 +694,21 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 1,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 1, metrics.getTotalOpCount());
 
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
-
 
     Assert.assertEquals(2, blockOutputStream.getBufferPool().getSize());
     Assert.assertEquals(dataLength, blockOutputStream.getWrittenDataLength());
 
-    Assert.assertEquals(0,
-        blockOutputStream.getTotalDataFlushedLength());
+    Assert.assertEquals(0, blockOutputStream.getTotalDataFlushedLength());
 
     Assert.assertTrue(blockOutputStream.getTotalAckDataLength() == 0);
 
@@ -740,8 +727,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 1,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 3,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 3, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -767,15 +753,14 @@ public class TestBlockOutputStreamWithFailures {
     // now close the stream, It will hit exception
     key.close();
 
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof ContainerNotOpenException);
     // Make sure the retryCount is reset after the exception is handled
     Assert.assertTrue(keyOutputStream.getRetryCount() == 0);
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
     Assert.assertEquals(pendingWriteChunkCount,
         metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk));
@@ -785,8 +770,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 9,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 9, metrics.getTotalOpCount());
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 0);
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
@@ -797,14 +781,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testWatchForCommitWithSingleNodeRatis() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key =
@@ -828,15 +812,14 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
 
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -872,8 +855,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // flush is a sync call, all pending operations will complete
     Assert.assertEquals(pendingWriteChunkCount,
@@ -907,7 +889,7 @@ public class TestBlockOutputStreamWithFailures {
     // and one flush for partial chunk
     key.flush();
 
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof ContainerNotOpenException);
     // Make sure the retryCount is reset after the exception is handled
     Assert.assertTrue(keyOutputStream.getRetryCount() == 0);
@@ -919,10 +901,9 @@ public class TestBlockOutputStreamWithFailures {
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
-    Assert.assertEquals(0, keyOutputStream.getStreamEntries().size());
+    Assert.assertEquals(0, keyOutputStream.getLocationInfoList().size());
     Assert.assertEquals(pendingWriteChunkCount,
         metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(pendingPutBlockCount,
@@ -931,8 +912,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 8,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 22,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 22, metrics.getTotalOpCount());
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     validateData(keyName, dataString.concat(dataString).getBytes());
@@ -942,14 +922,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testDatanodeFailureWithSingleNodeRatis() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key =
@@ -972,14 +952,13 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 1);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -1015,8 +994,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -1044,7 +1022,7 @@ public class TestBlockOutputStreamWithFailures {
 
     key.flush();
 
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof RaftRetryFailureException);
     Assert.assertEquals(1, raftClient.getCommitInfoMap().size());
     // Make sure the retryCount is reset after the exception is handled
@@ -1052,8 +1030,7 @@ public class TestBlockOutputStreamWithFailures {
     Assert.assertEquals(2, keyOutputStream.getStreamEntries().size());
     // now close the stream, It will update the ack length after watchForCommit
     key.close();
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
@@ -1073,9 +1050,8 @@ public class TestBlockOutputStreamWithFailures {
     // flush failed + 3 more flushes for the next block
     Assert.assertEquals(putBlockCount + 8,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 22,
-        metrics.getTotalOpCount());
-    Assert.assertEquals(0, keyOutputStream.getStreamEntries().size());
+    Assert.assertEquals(totalOpCount + 22, metrics.getTotalOpCount());
+    Assert.assertEquals(0, keyOutputStream.getLocationInfoList().size());
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     cluster.restartHddsDatanode(pipeline.getNodes().get(0), true);
@@ -1086,14 +1062,14 @@ public class TestBlockOutputStreamWithFailures {
   public void testDatanodeFailureWithPreAllocation() throws Exception {
     XceiverClientMetrics metrics =
         XceiverClientManager.getXceiverClientMetrics();
-    long writeChunkCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long putBlockCount = metrics.getContainerOpCountMetrics(
-        ContainerProtos.Type.PutBlock);
-    long pendingWriteChunkCount =  metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.WriteChunk);
-    long pendingPutBlockCount = metrics.getContainerOpsMetrics(
-        ContainerProtos.Type.PutBlock);
+    long writeChunkCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk);
+    long putBlockCount =
+        metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock);
+    long pendingWriteChunkCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk);
+    long pendingPutBlockCount =
+        metrics.getContainerOpsMetrics(ContainerProtos.Type.PutBlock);
     long totalOpCount = metrics.getTotalOpCount();
     String keyName = getKeyName();
     OzoneOutputStream key =
@@ -1117,14 +1093,13 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 2,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 6,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 6, metrics.getTotalOpCount());
     Assert.assertTrue(key.getOutputStream() instanceof KeyOutputStream);
-    KeyOutputStream keyOutputStream = (KeyOutputStream)key.getOutputStream();
+    KeyOutputStream keyOutputStream = (KeyOutputStream) key.getOutputStream();
 
     Assert.assertTrue(keyOutputStream.getStreamEntries().size() == 3);
-    OutputStream stream = keyOutputStream.getStreamEntries().get(0)
-        .getOutputStream();
+    OutputStream stream =
+        keyOutputStream.getStreamEntries().get(0).getOutputStream();
     Assert.assertTrue(stream instanceof BlockOutputStream);
     BlockOutputStream blockOutputStream = (BlockOutputStream) stream;
 
@@ -1160,8 +1135,7 @@ public class TestBlockOutputStreamWithFailures {
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(putBlockCount + 3,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 8,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 8, metrics.getTotalOpCount());
 
     // Since the data in the buffer is already flushed, flush here will have
     // no impact on the counters and data structures
@@ -1188,7 +1162,7 @@ public class TestBlockOutputStreamWithFailures {
 
     key.flush();
 
-    Assert.assertTrue(keyOutputStream.checkForException(blockOutputStream
+    Assert.assertTrue(HddsClientUtils.checkForException(blockOutputStream
         .getIoException()) instanceof RaftRetryFailureException);
 
     // Make sure the retryCount is reset after the exception is handled
@@ -1197,13 +1171,12 @@ public class TestBlockOutputStreamWithFailures {
 
     // now close the stream, It will update the ack length after watchForCommit
     key.close();
-    Assert
-        .assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
+    Assert.assertEquals(dataLength, blockOutputStream.getTotalAckDataLength());
     // make sure the bufferPool is empty
     Assert
         .assertEquals(0, blockOutputStream.getBufferPool().computeBufferData());
     Assert.assertNull(blockOutputStream.getCommitIndex2flushedDataMap());
-    Assert.assertEquals(0, keyOutputStream.getStreamEntries().size());
+    Assert.assertEquals(0, keyOutputStream.getLocationInfoList().size());
     Assert.assertEquals(pendingWriteChunkCount,
         metrics.getContainerOpsMetrics(ContainerProtos.Type.WriteChunk));
     Assert.assertEquals(pendingPutBlockCount,
@@ -1219,8 +1192,7 @@ public class TestBlockOutputStreamWithFailures {
     // flush failed + 3 more flushes for the next block
     Assert.assertEquals(putBlockCount + 8,
         metrics.getContainerOpCountMetrics(ContainerProtos.Type.PutBlock));
-    Assert.assertEquals(totalOpCount + 22,
-        metrics.getTotalOpCount());
+    Assert.assertEquals(totalOpCount + 22, metrics.getTotalOpCount());
     // Written the same data twice
     String dataString = new String(data1, UTF_8);
     cluster.restartHddsDatanode(pipeline.getNodes().get(0), true);
