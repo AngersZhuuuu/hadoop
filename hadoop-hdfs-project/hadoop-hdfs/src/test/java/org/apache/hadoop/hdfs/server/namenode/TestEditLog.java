@@ -182,8 +182,8 @@ public class TestEditLog {
 
   // This test creates NUM_THREADS threads and each thread does
   // 2 * NUM_TRANSACTIONS Transactions concurrently.
-  static final int NUM_TRANSACTIONS = 100;
-  static final int NUM_THREADS = 100;
+  static final int NUM_TRANSACTIONS = 1000;
+  static final int NUM_THREADS = 1000;
   
   static final File TEST_DIR = PathUtils.getTestDir(TestEditLog.class);
   
@@ -247,10 +247,48 @@ public class TestEditLog {
         editLog.logOpenFile("/filename" + (startIndex + i), inode, false, false);
         editLog.logCloseFile("/filename" + (startIndex + i), inode);
         editLog.logSync();
+//        if(i % 100 ==0){
+//            try {
+//                editLog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
+//              } catch (IOException e) {
+//                  e.printStackTrace();
+//              }
+//          }
       }
     }
   }
-  
+
+
+  static class TransactionRollEditLog implements Runnable {
+    final FSNamesystem namesystem;
+    final int numTransactions;
+    final short replication = 3;
+    final long blockSize = 64;
+
+    TransactionRollEditLog(FSNamesystem ns, int numTx) {
+      namesystem = ns;
+      numTransactions = numTx;
+    }
+
+    // add a bunch of transactions.
+    @Override
+    public void run() {
+      PermissionStatus p = namesystem.createFsOwnerPermissions(
+              new FsPermission((short)0777));
+      FSEditLog editLog = namesystem.getEditLog();
+
+      for (int i = 0; i < numTransactions; i++) {
+        if(i % 50 == 0){
+          try {
+            editLog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
+          } catch (IOException e) {
+            e.printStackTrace();
+          }
+        }
+      }
+    }
+  }
+
   /**
    * Construct FSEditLog with default configuration, taking editDirs from NNStorage
    * 
@@ -443,7 +481,7 @@ public class TestEditLog {
   public void testMultiThreadedEditLog() throws IOException {
     testEditLog(2048);
     // force edit buffer to automatically sync on each log of edit log entry
-    testEditLog(1);
+//    testEditLog(1);
   }
   
   
@@ -498,6 +536,10 @@ public class TestEditLog {
       
       // Create threads and make them run transactions concurrently.
       Thread threadId[] = new Thread[NUM_THREADS];
+
+      TransactionRollEditLog rollEditLog = new TransactionRollEditLog(namesystem, NUM_TRANSACTIONS * 5);
+      Thread rollEditLogThread = new Thread(rollEditLog);
+      rollEditLogThread.start();
       for (int i = 0; i < NUM_THREADS; i++) {
         Transactions trans =
           new Transactions(namesystem, NUM_TRANSACTIONS, i*NUM_TRANSACTIONS);
@@ -512,7 +554,12 @@ public class TestEditLog {
         } catch (InterruptedException e) {
           i--;      // retry 
         }
-      } 
+      }
+      try {
+        rollEditLogThread.join();
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
 
       // Reopen some files as for append
       Transactions trans = 

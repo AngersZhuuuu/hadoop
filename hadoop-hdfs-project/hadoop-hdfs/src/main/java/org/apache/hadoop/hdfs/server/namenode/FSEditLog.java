@@ -608,11 +608,24 @@ public class FSEditLog implements LogsPurgeable {
     LOG.info("logSyncAll toSyncToTxId=" + lastWrittenTxId
         + " lastSyncedTxid=" + synctxid
         + " mostRecentTxid=" + txid);
-    logSync(lastWrittenTxId);
+    logSync(lastWrittenTxId, false);
     lastWrittenTxId = getLastWrittenTxId();
     LOG.info("Done logSyncAll lastWrittenTxId=" + lastWrittenTxId
         + " lastSyncedTxid=" + synctxid
         + " mostRecentTxid=" + txid);
+  }
+
+  void logSyncAllEndSegment() {
+    // Make sure we're synced up to the most recent transaction ID.
+    long lastWrittenTxId = getLastWrittenTxId();
+    LOG.info("logSyncAll toSyncToTxId=" + lastWrittenTxId
+            + " lastSyncedTxid=" + synctxid
+            + " mostRecentTxid=" + txid);
+    logSync(lastWrittenTxId, true);
+    lastWrittenTxId = getLastWrittenTxId();
+    LOG.info("Done logSyncAll lastWrittenTxId=" + lastWrittenTxId
+            + " lastSyncedTxid=" + synctxid
+            + " mostRecentTxid=" + txid);
   }
 
   /**
@@ -645,10 +658,10 @@ public class FSEditLog implements LogsPurgeable {
    */
   public void logSync() {
     // Fetch the transactionId of this thread.
-    logSync(myTransactionId.get().txid);
+    logSync(myTransactionId.get().txid, false);
   }
 
-  protected void logSync(long mytxid) {
+  protected void logSync(long mytxid, boolean isEndLog) {
     long syncStart = 0;
     boolean sync = false;
     long editsBatchedInSync = 0;
@@ -670,6 +683,10 @@ public class FSEditLog implements LogsPurgeable {
           // If this transaction was already flushed, then nothing to do
           //
           if (mytxid <= synctxid) {
+            if (txid > synctxid && isEndLog)
+              LOG.info("When logSync (mytxid <= synctxid)  mytxid=" + mytxid
+                      + " lastSyncedTxid=" + synctxid
+                      + " mostRecentTxid=" + txid);
             return;
           }
 
@@ -1422,7 +1439,7 @@ public class FSEditLog implements LogsPurgeable {
           FSEditLogOpCodes.OP_END_LOG_SEGMENT));
     }
     // always sync to ensure all edits are flushed.
-    logSyncAll();
+    logSyncAllEndSegment();
 
     printStatistics(true);
     
