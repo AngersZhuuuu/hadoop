@@ -240,7 +240,7 @@ class FSEditLogAsync extends FSEditLog implements Runnable {
           // relying on ExitUtil.terminate need to see the exception.
           RuntimeException syncEx = null;
           try {
-            logSync(getLastWrittenTxId(), false);
+            logSync(getLastWrittenTxId());
           } catch (RuntimeException ex) {
             syncEx = ex;
           }
