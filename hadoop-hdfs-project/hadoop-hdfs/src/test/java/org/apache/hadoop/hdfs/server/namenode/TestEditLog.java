@@ -277,15 +277,25 @@ public class TestEditLog {
               new FsPermission((short)0777));
       FSEditLog editLog = namesystem.getEditLog();
 
-      for (int i = 0; i < numTransactions; i++) {
-        if(i % 50 == 0){
-          try {
-            editLog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
-          } catch (IOException e) {
-            e.printStackTrace();
-          }
+      while (true) {
+        try {
+          Thread.sleep(3000);
+          editLog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
+        } catch (IOException e) {
+          e.printStackTrace();
+        } catch (InterruptedException e) {
+          e.printStackTrace();
         }
       }
+//      for (int i = 0; i < numTransactions; i++) {
+//        if(i % 50 == 0){
+//          try {
+//            editLog.rollEditLog(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
+//          } catch (IOException e) {
+//            e.printStackTrace();
+//          }
+//        }
+//      }
     }
   }
 
